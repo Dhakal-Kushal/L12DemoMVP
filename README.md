@@ -13,6 +13,7 @@ pipeline/
     config.py
     images.py
     geometry.py
+    heatmaps.py
     stage1.py
     stage2.py
     stage3.py
@@ -91,7 +92,7 @@ Outputs are ignored by Git and recreated by the pipeline. Repeated runs overwrit
 
 ## Stage 3: paired building assessment and scene heatmap
 
-After Stage 2 successfully writes its JSON, the entry script passes that exact output path to Stage 3. Stage 1 rejection or Stage 2 failure stops the chain. Stage 3 loads both original images and crops matching rectangles using the rounded, clipped `bbox_xyxy` coordinates. It retains Stage 2's padding and does not use the annotated images or apply rotated masking.
+After Stage 2 successfully writes its JSON, the entry script passes that exact output path to Stage 3. Stage 1 rejection or Stage 2 failure stops the chain. Stage 3 loads both original images and crops matching rectangles using the rounded, clipped `bbox_xyxy` coordinates. Model inputs retain Stage 2's padding and use original image pixels. Display masking is applied after inference.
 
 For each building, AnomalyDINO builds a reference bank from that building's before crop and scores its after crop. The encoder is loaded once; reference state is cleared for each building. This assumes the before image is undamaged and the source tiles are aligned. Raw anomaly scores are not damage probabilities or severity classifications.
 
@@ -113,7 +114,24 @@ stage3Heatmaps/
         building_0_anomaly.npy
 ```
 
-Each building is still cropped and assessed separately in memory. Its anomaly map is resized to the crop dimensions and placed at the original crop coordinates on the full after scene. Overlaps use the maximum anomaly value and are blended only once. Pixels outside successfully assessed crop rectangles remain unchanged; the rectangles include Stage 2's padding. One `after<PAIR_ID>_heatmap.png` is saved for the entire scene, using a fixed 0?1 display scale. Individual crop PNGs are no longer saved. Per-building `.npy` files preserve raw maps. `anomalies.json` records IDs, source paths, crop bounds, anomaly scores, raw-map paths, and per-building status. The report also links the full-scene heatmap and records the overlap rule. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report without loading AnomalyDINO.
+Each building is cropped and assessed separately in memory. Raw anomaly maps are resized and projected back onto the after scene. Overlaps use the maximum anomaly value and are blended once. Individual crop PNGs are not saved; `.npy` files preserve the original maps and JSON preserves each raw score.
+
+`pipeline/heatmaps.py` handles visualization. By default, heatmap color is restricted to Stage 2's rotated roof polygons; missing or degenerate polygons fall back to crop rectangles. This only affects display, not inference or scores. Use `--show-context` to include the original padded rectangles, including possible rubble around the building.
+
+All displayed buildings share one scale, derived from the 30th and 98th percentiles of the covered scene pixels. Values at or below the lower limit are transparent; higher values progress through yellow, orange, and red with opacity rising to 80%. A flat scene uses a conservative 0-to-at-least-1 fallback to avoid exaggerating tiny numerical differences. This is scene-relative contrast, not calibrated damage severity, and default colors are not directly comparable across scenes.
+
+The image includes a legend with the actual thresholds and a dark-backed `B<id> | Anomaly: <raw score>` label for each assessed building. Labels are placed near their building with leader lines, kept within image bounds, and positioned to reduce collisions. In very crowded scenes some overlap may remain. The label is the model's building-level score; the heatmap shows local map values, so they need not have the same numerical maximum. Annotations intentionally occupy some background pixels.
+
+For consistent cross-scene displays, explicitly choose the same range for each run:
+
+```powershell
+python -m pipeline.stage3 --display-range 0.15 0.65 --show-context
+```
+
+These example limits are visualization settings, not validated intact/damaged thresholds. Choose production thresholds using known-intact and known-damaged examples. Low anomaly must not be interpreted as proof that a building is intact.
+
+`anomalies.json` records per-building scores, bounds, raw-map paths, display mask type, and success/failure status. It also records the full-scene image path, overlap rule, selected range, scale mode, opacity settings, legend position, and label positions. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report and annotated scene without loading AnomalyDINO.
+
 
 A report has status `completed`, `partial`, `failed`, or `empty`, with success/failure counts. Generated outputs are ignored by Git. Old run directories are retained, and the exact new report path is printed and returned by Stage 3.
 

@@ -8,15 +8,15 @@ from datetime import datetime
 
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image
 
 from . import config
+from .heatmaps import project_anomaly, render_heatmap
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ENCODER = "vit_small_patch14_dinov2"
 IMAGE_SIZE = (252, 252)
-OVERLAY_MAX = 1.0
 
 
 def crop_bounds(bbox, size):
@@ -33,7 +33,11 @@ def crop_bounds(bbox, size):
     return bounds
 
 
-def run_stage3_anomalydino(boxes_path, output_dir, device):
+def run_stage3_anomalydino(boxes_path, output_dir, device, *, display_range=None, mask_roofs=True):
+    if display_range is not None:
+        low, high = map(float, display_range)
+        if not np.isfinite([low, high]).all() or not 0 <= low < high:
+            raise ValueError("Display range must contain finite values with 0 <= low < high.")
     with open(boxes_path, encoding="utf-8") as handle:
         metadata = json.load(handle)
     pair_id = metadata["pair_id"]
@@ -121,28 +125,21 @@ def run_stage3_anomalydino(boxes_path, output_dir, device):
 
             map_name = f"building_{box_id}_anomaly.npy"
             np.save(run_dir / map_name, anomaly_map)
-            projected = np.asarray(Image.fromarray(anomaly_map.astype(np.float32)).resize(
-                crop.size, Image.Resampling.BILINEAR
-            ))
-            xmin, ymin, xmax, ymax = crop_box
-            region = scene_map[ymin:ymax, xmin:xmax]
-            np.maximum(region, projected, out=region)
-            coverage[ymin:ymax, xmin:xmax] = True
+            display_mask = project_anomaly(
+                scene_map, coverage, anomaly_map, crop_box,
+                box.get("rotated_corners") if mask_roofs else None,
+            )
             results.append({
                 "box_id": box_id,
                 "status": "completed",
                 "crop_bbox_xyxy": crop_box,
                 "anomaly_score": score,
                 "anomaly_map": map_name,
+                "display_mask": display_mask,
             })
             print(f"Box {box_id}: raw anomaly score {score:.5f}")
 
-    scaled = np.clip(scene_map / OVERLAY_MAX, 0, 1)
-    heat = Image.fromarray((scaled * 255).astype(np.uint8))
-    heat = ImageOps.colorize(heat, black="#111126", white="#fff12c", mid="#d04518")
-    blended = Image.blend(after_img, heat, 0.45)
-    mask = Image.fromarray(coverage.astype(np.uint8) * 255)
-    overlay = Image.composite(blended, after_img, mask)
+    overlay, visualization = render_heatmap(after_img, scene_map, coverage, results, display_range)
     overlay_name = f"after{pair_id}_heatmap.png"
     overlay.save(run_dir / overlay_name)
 
@@ -161,7 +158,9 @@ def run_stage3_anomalydino(boxes_path, output_dir, device):
             "stage2_boxes": Path(boxes_path).resolve().as_posix(),
             "encoder": ENCODER,
             "reference_mode": "matching_before_crop",
-            "overlay_display_range": [0, OVERLAY_MAX],
+            "overlay_display_range": visualization["range"],
+            "visualization": visualization,
+            "roof_mask_requested": mask_roofs,
             "scene_heatmap": overlay_name,
             "overlap_rule": "maximum",
             "boxes": results,
@@ -176,8 +175,11 @@ def main():
     parser.add_argument("--boxes", type=Path, default=ROOT / config.STAGE2_OUTPUT_DIR / "boxes.json")
     parser.add_argument("--output", type=Path, default=ROOT / config.STAGE3_OUTPUT_DIR)
     parser.add_argument("--device", default=config.DEVICE)
+    parser.add_argument("--display-range", type=float, nargs=2, metavar=("LOW", "HIGH"))
+    parser.add_argument("--show-context", action="store_true")
     args = parser.parse_args()
-    run_stage3_anomalydino(args.boxes, args.output, args.device)
+    run_stage3_anomalydino(args.boxes, args.output, args.device,
+                         display_range=args.display_range, mask_roofs=not args.show_context)
 
 
 if __name__ == "__main__":
