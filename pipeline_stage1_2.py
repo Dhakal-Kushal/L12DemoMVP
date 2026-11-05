@@ -8,6 +8,7 @@ from pipeline import config
 from pipeline.images import find_image
 from pipeline.stage1 import run_stage1_clip
 from pipeline.stage2 import run_stage2_owlv2
+from pipeline.stage3 import run_stage3_anomalydino
 
 
 def main():
@@ -36,7 +37,8 @@ def main():
         print("Stage 1 Verdict: NOT USABLE. Stopping pipeline.")
         sys.exit(0)
     print("Stage 1 Verdict: USABLE. Proceeding to Stage 2.")
-    run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
+    boxes_path = run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
+    run_stage3_anomalydino(boxes_path, config.STAGE3_OUTPUT_DIR, config.DEVICE)
 
 
 if __name__ == "__main__":

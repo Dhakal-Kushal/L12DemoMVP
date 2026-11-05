@@ -125,3 +125,4 @@ def run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
         json.dump(metadata, handle, indent=2, ensure_ascii=False, allow_nan=False)
         handle.write("\n")
     print(f"Stage 3 metadata saved: {json_path}")
+    return json_path

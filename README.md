@@ -1,6 +1,6 @@
 # Satellite Damage Assessment Pipeline
 
-The current script implements CLIP scene validation followed by before-image OWLv2 building detection, box merging, padding, and OpenCV roof orientation estimation. Matching polygons are projected onto the after image. Stage 3 damage assessment is being developed separately.
+The current script implements CLIP scene validation followed by before-image OWLv2 building detection, box merging, padding, and OpenCV roof orientation estimation. Matching polygons are projected onto the after image. Stage 3 scores each after-building crop against its matching before crop with AnomalyDINO and saves per-building heatmaps.
 
 See [designReport.md](designReport.md) for the current architecture and proposed production deployment.
 
@@ -15,11 +15,12 @@ pipeline/
     geometry.py
     stage1.py
     stage2.py
+    stage3.py
 ```
 
-`pipeline_stage1_2.py` coordinates the stages and remains the command-line entry point. Edit shared settings in `pipeline/config.py`. Image lookup lives in `images.py`, box merging and roof orientation in `geometry.py`, CLIP validation in `stage1.py`, and OWLv2 detection and export in `stage2.py`.
+`pipeline_stage1_2.py` coordinates the stages and remains the command-line entry point. Edit shared settings in `pipeline/config.py`. Image lookup lives in `images.py`, box merging and roof orientation in `geometry.py`, CLIP validation in `stage1.py`, OWLv2 detection and export in `stage2.py`, and paired anomaly assessment in `stage3.py`.
 
-Add future stages as `pipeline/stage3.py` and `pipeline/stage4.py`, then import and call their entry functions from `main` in execution order. Stage 3 can consume Stage 2's existing JSON and source images. No placeholder stages are included.
+Stages 1, 2, and 3 run in sequence from `main`. A future Stage 4 can be added as `pipeline/stage4.py` and called after Stage 3 returns its report path.
 
 ## Setup after cloning
 
@@ -43,7 +44,7 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip check
 ```
 
-The requirements pin the five direct dependencies to versions observed in the current development environment. They are not a complete lock of transitive dependencies, and a fresh installation on every platform has not been validated. Record and review dependency changes together when Stage 3 introduces additional packages; avoid replacing this list with a freeze of an unrelated global environment.
+The requirements pin the direct dependencies to versions observed in the current development environment. They are not a complete lock of transitive dependencies, and a fresh installation on every platform has not been validated. Record and review dependency changes together when Stage 3 introduces additional packages; avoid replacing this list with a freeze of an unrelated global environment.
 
 For how pip installs requirements files, see the [pip user guide](https://pip.pypa.io/en/stable/user_guide/#requirements-files).
 
@@ -70,7 +71,7 @@ The second line should print `True` for CUDA operation. Merely changing `DEVICE`
 
 The sample images in `inputImages/` are tracked by Git and included when cloning the repository. Add additional shareable image pairs to this folder as needed; keep private imagery outside the repository.
 
-Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. In `pipeline/config.py`, set `PAIR_ID` to match the pair you supplied. The current configuration selects pair **2**. Before/after images must have identical dimensions and represent spatially aligned tiles.
+Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. In `pipeline/config.py`, set `PAIR_ID` to match the pair you supplied. Before/after images must have identical dimensions and represent spatially aligned tiles.
 
 Run from the repository root:
 
@@ -78,7 +79,7 @@ Run from the repository root:
 .\.venv\Scripts\python.exe pipeline_stage1_2.py
 ```
 
-Enter a target query at the prompt, or press Enter for the default building query. On the first run, Hugging Face downloads the CLIP and OWLv2 checkpoint files as their stages are reached, requiring internet access and local storage. Package installation does not download these weights. Later runs normally reuse the local Hugging Face cache. Weights are not committed to Git.
+Enter a target query at the prompt, or press Enter for the default building query. On the first run, Hugging Face downloads the CLIP, OWLv2, and DINOv2 checkpoint files as their stages are reached, requiring internet access and local storage. Package installation does not download these weights. Later runs normally reuse the local Hugging Face cache. Weights are not committed to Git.
 
 Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 
@@ -88,11 +89,35 @@ Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 
 Outputs are ignored by Git and recreated by the pipeline. Repeated runs overwrite these paths. A failed or rejected run may leave older outputs present, so check the terminal verdict before using an existing JSON file.
 
-## Collaborating on Stage 3
+## Stage 3: paired building heatmaps
 
-Commit source code, `requirements.txt`, this README, `.gitignore`, and the design report. Work on branches and review changes before merging. When Stage 3 adds dependencies, update the shared requirements and ask collaborators to rerun the installation command.
+After Stage 2 successfully writes its JSON, the entry script passes that exact output path to Stage 3. Stage 1 rejection or Stage 2 failure stops the chain. Stage 3 loads both original images and crops matching rectangles using the rounded, clipped `bbox_xyxy` coordinates. It retains Stage 2's padding and does not use the annotated images or apply rotated masking.
 
-Stage 3 should read `stage2json/boxes.json` and the **original** before/after images. Match entries by pair and `box_id`; use `bbox_xyxy` for rectangular crops and `rotated_corners` for masks or alignment. Both sections contain identical before-derived geometry. Detection confidence is not damage confidence.
+For each building, AnomalyDINO builds a reference bank from that building's before crop and scores its after crop. The encoder is loaded once; reference state is cleared for each building. This assumes the before image is undamaged and the source tiles are aligned. Raw anomaly scores are not damage probabilities or severity classifications.
+
+To rerun Stage 3 separately against an existing export:
+
+```powershell
+python -m pipeline.stage3 --boxes stage2json/boxes.json
+```
+
+The separate reference-directory argument is no longer needed. `--device` and `--output` can override defaults. Anomalib 2.7.0 and timm are included in `requirements.txt`; OpenCV headless supplies `cv2` for both stages.
+
+The configured `STAGE3_OUTPUT_DIR` defaults to `stage3Heatmaps/`. Each invocation creates a timestamped directory:
+
+```text
+stage3Heatmaps/
+    pair3_<timestamp>/
+        anomalies.json
+        building_0_before.png
+        building_0_after.png
+        building_0_heatmap.png
+        building_0_anomaly.npy
+```
+
+Every successfully assessed building gets these four artifacts. The heatmap overlays the after crop at its original crop size, using one fixed 0?1 display scale across buildings. The `.npy` file preserves raw values. `anomalies.json` records IDs, source paths, crop bounds, anomaly scores, artifact paths, and per-building status. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report without loading AnomalyDINO.
+
+A report has status `completed`, `partial`, `failed`, or `empty`, with success/failure counts. Generated outputs are ignored by Git. Old run directories are retained, and the exact new report path is printed and returned by Stage 3.
 
 For a tracked integration fixture, place a small image pair and its example JSON under `examples/`, with source paths adjusted to that fixture. There is no blanket ignore rule for image or JSON extensions, so those examples can be committed. Do not use the ignored runtime output folders for fixtures you intend to share.
 

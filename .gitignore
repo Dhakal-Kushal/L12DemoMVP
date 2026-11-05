@@ -22,6 +22,7 @@ dist/
 /boxedOutput/
 /stage2json/
 /stage3outputs/
+/stage3Heatmaps/
 
 # Downloaded models and local caches
 /models/

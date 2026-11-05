@@ -1,19 +1,10 @@
-"""Score Stage 2 building crops with a shared AnomalyDINO reference bank.
-
-Run from the repo root with an Anomalib 2.7.0 environment:
-    python -m pipeline.stage3 --references inputImages/normal
-
-Supply separate known-undamaged building crops as PNGs in the reference
-directory. Use the same kind of crop and surrounding context as Stage 2.
-The first run may download the pretrained DINOv2 encoder. Stage 3 can run
-in a separate Python environment from Stages 1 and 2.
-"""
+"""Score each Stage 2 after-building crop against its matching before crop."""
 
 import argparse
 import json
 import math
 from pathlib import Path
-import tempfile
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -42,10 +33,12 @@ def crop_bounds(bbox, size):
     return bounds
 
 
-def run_stage3_anomalydino(boxes_path, reference_dir, output_dir, device):
+def run_stage3_anomalydino(boxes_path, output_dir, device):
     with open(boxes_path, encoding="utf-8") as handle:
         metadata = json.load(handle)
     pair_id = metadata["pair_id"]
+    if type(pair_id) is not int or pair_id < 0:
+        raise ValueError("Stage 2 pair_id must be a nonnegative integer.")
     before, after = metadata["before"], metadata["after"]
     boxes = after["boxes"]
     if before["boxes"] != boxes or any(
@@ -56,68 +49,79 @@ def run_stage3_anomalydino(boxes_path, reference_dir, output_dir, device):
     if any(type(box_id) is not int or box_id < 0 for box_id in box_ids) or len(set(box_ids)) != len(box_ids):
         raise ValueError("Stage 2 box IDs must be unique nonnegative integers.")
 
-    source_path = (ROOT / after["source_image"]).resolve()
-    with Image.open(source_path) as image:
+    before_path = (ROOT / before["source_image"]).resolve()
+    after_path = (ROOT / after["source_image"]).resolve()
+    with Image.open(before_path) as image:
+        before_img = image.convert("RGB")
+    with Image.open(after_path) as image:
         after_img = image.convert("RGB")
     expected_size = (after["width"], after["height"])
-    if after_img.size != expected_size or (before["width"], before["height"]) != expected_size:
+    if (after_img.size != expected_size or before_img.size != expected_size
+            or (before["width"], before["height"]) != expected_size):
         raise ValueError("Stage 2 dimensions do not match the source imagery.")
-    bounds = [crop_bounds(box["bbox_xyxy"], after_img.size) for box in boxes]
 
     print(f"\n--- STAGE 3: ANOMALYDINO (Pair {pair_id}) ---")
     if not boxes:
         print("Stage 2 exported zero boxes. Nothing to score.")
-        return None
-    references = sorted(
-        path for path in Path(reference_dir).iterdir()
-        if path.is_file() and path.suffix.lower() == ".png"
-    )
-    if not references:
-        raise ValueError("Provide PNG crops of separate undamaged buildings in --references.")
-    if source_path in {path.resolve() for path in references}:
-        raise ValueError("The after image cannot be used as a normal reference.")
     device = torch.device(device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError('CUDA is unavailable. Run with --device cpu.')
 
-    from anomalib.models.image.anomaly_dino.lightning_model import AnomalyDINO
-    from anomalib.models.image.anomaly_dino.torch_model import AnomalyDINOModel
+    if boxes:
+        from anomalib.models.image.anomaly_dino.lightning_model import AnomalyDINO
+        from anomalib.models.image.anomaly_dino.torch_model import AnomalyDINOModel
 
-    model = AnomalyDINOModel(
-        num_neighbours=1, encoder_name=ENCODER, masking=False, coreset_subsampling=False
-    ).to(device)
-    preprocess = AnomalyDINO.configure_pre_processor(image_size=IMAGE_SIZE).to(device)
+        model = AnomalyDINOModel(
+            num_neighbours=1, encoder_name=ENCODER, masking=False, coreset_subsampling=False
+        ).to(device)
+        preprocess = AnomalyDINO.configure_pre_processor(image_size=IMAGE_SIZE).to(device)
 
     def tensor(image):
         rgb = torch.from_numpy(np.array(image.convert("RGB")))
         return preprocess(rgb.permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0)
 
-    print(f"Building a shared bank from {len(references)} normal crops on {device}.")
-    model.train()
-    model.feature_encoder.eval()
-    with torch.inference_mode():
-        for reference in references:
-            with Image.open(reference) as image:
-                model(tensor(image))
-        model.fit()
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=output_dir))
+    run_dir = output_dir / f"pair{pair_id}_{datetime.now():%Y%m%d_%H%M%S_%f}"
+    run_dir.mkdir()
     results = []
-    model.eval()
     with torch.inference_mode():
-        for box_id, crop_box in zip(box_ids, bounds):
-            crop = after_img.crop(crop_box)
-            result = model(tensor(crop))
-            score = float(result.pred_score.item())
-            anomaly_map = result.anomaly_map.cpu().numpy().squeeze()
-            if not math.isfinite(score) or not np.isfinite(anomaly_map).all():
-                raise RuntimeError(f"AnomalyDINO returned non-finite values for box {box_id}.")
+        for box in boxes:
+            box_id = box["box_id"]
+            try:
+                crop_box = crop_bounds(box["bbox_xyxy"], after_img.size)
+                before_crop = before_img.crop(crop_box)
+                crop = after_img.crop(crop_box)
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                results.append({"box_id": box_id, "status": "failed", "error": str(error)})
+                print(f"Box {box_id}: failed crop: {error}")
+                continue
 
-            crop_name = f"box_{box_id}_after.png"
-            map_name = f"box_{box_id}_anomaly.npy"
-            overlay_name = f"box_{box_id}_overlay.png"
+            model.embedding_store.clear()
+            model.memory_bank = model.memory_bank.new_empty(0)
+            try:
+                model.train()
+                model.feature_encoder.eval()
+                model(tensor(before_crop))
+                model.fit()
+                model.eval()
+                result = model(tensor(crop))
+                score = float(result.pred_score.item())
+                anomaly_map = result.anomaly_map.cpu().numpy().squeeze()
+                if not math.isfinite(score) or not np.isfinite(anomaly_map).all():
+                    raise ValueError("AnomalyDINO returned non-finite values.")
+            except torch.OutOfMemoryError:
+                raise
+            except (ValueError, RuntimeError) as error:
+                results.append({"box_id": box_id, "status": "failed", "error": str(error)})
+                print(f"Box {box_id}: failed assessment: {error}")
+                continue
+
+            before_name = f"building_{box_id}_before.png"
+            crop_name = f"building_{box_id}_after.png"
+            map_name = f"building_{box_id}_anomaly.npy"
+            overlay_name = f"building_{box_id}_heatmap.png"
+            before_crop.save(run_dir / before_name)
             crop.save(run_dir / crop_name)
             np.save(run_dir / map_name, anomaly_map)
             # Apply a shared display scale while preserving the original float map.
@@ -128,7 +132,9 @@ def run_stage3_anomalydino(boxes_path, reference_dir, output_dir, device):
             overlay.save(run_dir / overlay_name)
             results.append({
                 "box_id": box_id,
+                "status": "completed",
                 "crop_bbox_xyxy": crop_box,
+                "before_crop": before_name,
                 "after_crop": crop_name,
                 "anomaly_score": score,
                 "anomaly_map": map_name,
@@ -137,13 +143,20 @@ def run_stage3_anomalydino(boxes_path, reference_dir, output_dir, device):
             print(f"Box {box_id}: raw anomaly score {score:.5f}")
 
     report_path = run_dir / "anomalies.json"
+    succeeded = sum(box["status"] == "completed" for box in results)
     with report_path.open("w", encoding="utf-8") as handle:
         json.dump({
             "pair_id": pair_id,
-            "source_image": source_path.as_posix(),
+            "status": ("empty" if not boxes else "completed" if succeeded == len(boxes)
+                       else "partial" if succeeded else "failed"),
+            "num_detections": len(boxes),
+            "num_completed": succeeded,
+            "num_failed": len(boxes) - succeeded,
+            "before_image": before_path.as_posix(),
+            "after_image": after_path.as_posix(),
             "stage2_boxes": Path(boxes_path).resolve().as_posix(),
             "encoder": ENCODER,
-            "reference_images": [path.resolve().as_posix() for path in references],
+            "reference_mode": "matching_before_crop",
             "overlay_display_range": [0, OVERLAY_MAX],
             "boxes": results,
         }, handle, indent=2, allow_nan=False)
@@ -155,11 +168,10 @@ def run_stage3_anomalydino(boxes_path, reference_dir, output_dir, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--boxes", type=Path, default=ROOT / config.STAGE2_OUTPUT_DIR / "boxes.json")
-    parser.add_argument("--references", type=Path, default=ROOT / config.IMAGE_DIR / "normal")
-    parser.add_argument("--output", type=Path, default=ROOT / "stage3outputs")
+    parser.add_argument("--output", type=Path, default=ROOT / config.STAGE3_OUTPUT_DIR)
     parser.add_argument("--device", default=config.DEVICE)
     args = parser.parse_args()
-    run_stage3_anomalydino(args.boxes, args.references, args.output, args.device)
+    run_stage3_anomalydino(args.boxes, args.output, args.device)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ PAIR_ID = 2
 IMAGE_DIR = "inputImages"
 OUTPUT_DIR = "boxedOutput"
 STAGE2_OUTPUT_DIR = "stage2json"
+STAGE3_OUTPUT_DIR = "stage3Heatmaps"
 
 
 NEGATIVE_QUERIES = [
