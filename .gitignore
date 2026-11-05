@@ -18,8 +18,7 @@ build/
 dist/
 *.egg-info/
 
-# Local input imagery and generated pipeline artifacts
-/inputImages/
+# Generated pipeline artifacts
 /boxedOutput/
 /stage2json/
 /stage3outputs/

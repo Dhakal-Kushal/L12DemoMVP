@@ -68,9 +68,9 @@ The second line should print `True` for CUDA operation. Merely changing `DEVICE`
 
 ## Input data and running
 
-The `inputImages/` folder is deliberately ignored by Git. Share imagery separately or add a small, approved fixture under a tracked `examples/` directory. Move or copy the desired pair into `inputImages/` before running.
+The sample images in `inputImages/` are tracked by Git and included when cloning the repository. Add additional shareable image pairs to this folder as needed; keep private imagery outside the repository.
 
-Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. In `pipeline/config.py`, set `PAIR_ID` to match the pair you supplied. The current configuration selects pair **3**. Before/after images must have identical dimensions and represent spatially aligned tiles.
+Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. In `pipeline/config.py`, set `PAIR_ID` to match the pair you supplied. The current configuration selects pair **2**. Before/after images must have identical dimensions and represent spatially aligned tiles.
 
 Run from the repository root:
 
