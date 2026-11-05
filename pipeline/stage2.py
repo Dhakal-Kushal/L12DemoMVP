@@ -1,11 +1,13 @@
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 from transformers import Owlv2ForObjectDetection, Owlv2Processor
 
+from .runs import new_run_id, source_hash
 from . import config
 from .geometry import clean_merge_and_pad_boxes, compute_rotated_box_corners
 
@@ -16,6 +18,13 @@ def run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
             "Before and after images must have identical pixel dimensions to "
             f"share boxes; got {before_img.size} and {after_img.size}."
         )
+    run_id = new_run_id(config.PAIR_ID)
+    source_hashes = [source_hash(path) for path in (before_path, after_path)]
+    for image, path in ((before_img, before_path), (after_img, after_path)):
+        with Image.open(path) as source:
+            if source.size != image.size or source.convert("RGB").tobytes() != image.tobytes():
+                raise ValueError(f"Loaded image differs from source file: {path}. Run the pipeline again.")
+    print(f"Run: {run_id}")
     print(f"\n--- STAGE 2: OWLv2 OBJECT DETECTION (Pair {config.PAIR_ID}) ---")
     processor = Owlv2Processor.from_pretrained("google/owlv2-base-patch16-ensemble")
     model = Owlv2ForObjectDetection.from_pretrained(
@@ -91,27 +100,38 @@ def run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
                             max(xmax, max(xs)), max(ymax, max(ys))]
     print(f"[{os.path.basename(before_path)}] {len(raw_boxes)} raw detections; "
           f"{len(boxes)} final merged and padded boxes.")
-    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    os.makedirs(config.STAGE2_OUTPUT_DIR, exist_ok=True)
+    boxed_dir = Path(config.OUTPUT_DIR) / run_id
+    json_dir = Path(config.STAGE2_OUTPUT_DIR) / run_id
+    boxed_dir.mkdir(parents=True)
+    json_dir.mkdir(parents=True)
+    if source_hashes != [source_hash(path) for path in (before_path, after_path)]:
+        raise ValueError("Source imagery changed during Stage 2. Run the pipeline again.")
     metadata = {
+        "run_id": run_id,
         "pair_id": config.PAIR_ID,
         "query": user_query,
         "threshold": config.STAGE2_BOX_THRESHOLD,
     }
-    for prefix, image, source_path in zip(
-        ("before", "after"), (before_img, after_img), (before_path, after_path)
+    for prefix, image, source_path, digest in zip(
+        ("before", "after"), (before_img, after_img), (before_path, after_path), source_hashes
     ):
         annotated = image.copy()
         draw = ImageDraw.Draw(annotated)
         for box in boxes:
             draw.polygon([tuple(point) for point in box["rotated_corners"]],
                          outline="red", width=2)
+            x, y = box["rotated_corners"][0]
+            draw.text((max(0, min(x, image.width - 30)), max(18, min(y, image.height - 15))),
+                      f"B{box['box_id']:02d}", fill="white", stroke_width=2, stroke_fill="black")
+        draw.rectangle((0, 0, image.width, 17), fill="#171b24")
+        draw.text((4, 2), f"Run: {run_id}", fill="white")
 
-        boxed_path = os.path.join(config.OUTPUT_DIR, f"{prefix}{config.PAIR_ID}_boxed.png")
+        boxed_path = str(boxed_dir / f"{prefix}{config.PAIR_ID}_boxed.png")
         annotated.save(boxed_path)
         metadata[prefix] = {
-            "source_image": source_path.replace(os.sep, "/"),
-            "boxed_image": boxed_path.replace(os.sep, "/"),
+            "source_sha256": digest,
+            "source_image": Path(source_path).resolve().as_posix(),
+            "boxed_image": Path(boxed_path).resolve().as_posix(),
             "width": image.width,
             "height": image.height,
             "num_detections": len(boxes),
@@ -120,9 +140,13 @@ def run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
         action = "drawn" if prefix == "before" else "projected from before"
         print(f"[{os.path.basename(source_path)}] {len(boxes)} boxes {action}. Saved: {boxed_path}")
 
-    json_path = os.path.join(config.STAGE2_OUTPUT_DIR, "boxes.json")
+    json_path = str(json_dir / "boxes.json")
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, ensure_ascii=False, allow_nan=False)
         handle.write("\n")
+    pointer = Path(config.STAGE2_OUTPUT_DIR) / "latest.json"
+    temporary = pointer.with_name(f".{run_id}.tmp")
+    temporary.write_text(json.dumps({"run_id": run_id, "boxes": f"{run_id}/boxes.json"}, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, pointer)
     print(f"Stage 3 metadata saved: {json_path}")
     return json_path

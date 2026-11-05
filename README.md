@@ -12,6 +12,7 @@ pipeline/
     __init__.py
     config.py
     images.py
+    runs.py
     geometry.py
     heatmaps.py
     stage1.py
@@ -84,11 +85,12 @@ Enter a target query at the prompt, or press Enter for the default building quer
 
 Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 
-- `boxedOutput/before<N>_boxed.png`
-- `boxedOutput/after<N>_boxed.png`
-- `stage2json/boxes.json`
+- `boxedOutput/<run_id>/before<N>_boxed.png`
+- `boxedOutput/<run_id>/after<N>_boxed.png`
+- `stage2json/<run_id>/boxes.json`
+- `stage2json/latest.json` pointing to the latest successful Stage 2 export
 
-Outputs are ignored by Git and recreated by the pipeline. Repeated runs overwrite these paths. A failed or rejected run may leave older outputs present, so check the terminal verdict before using an existing JSON file.
+Outputs are ignored by Git. Stage 2 generates one shared run ID (`pair<N>_<date>_<time>_<microseconds>`) used by both stages. Repeated pipeline runs preserve earlier results. The latest pointer updates atomically only after Stage 2 writes all its outputs; rejected or failed runs leave it pointing to the previous successful Stage 2 run. This pointer does not indicate Stage 3 success. Both boxed scenes and the heatmap display the run ID and matching `B<id>` building labels. Compare outputs with the same run ID.
 
 ## Stage 3: paired building assessment and scene heatmap
 
@@ -99,12 +101,12 @@ For each building, AnomalyDINO builds a reference bank from that building's befo
 To rerun Stage 3 separately against an existing export:
 
 ```powershell
-python -m pipeline.stage3 --boxes stage2json/boxes.json
+python -m pipeline.stage3 --boxes stage2json/<run_id>/boxes.json --output stage3Heatmaps/review
 ```
 
-The separate reference-directory argument is no longer needed. `--device` and `--output` can override defaults. Anomalib 2.7.0 and timm are included in `requirements.txt`; OpenCV headless supplies `cv2` for both stages.
+Replace `<run_id>` with the actual folder name. Omitting `--boxes` selects the latest successful Stage 2 export. Existing Stage 3 run folders are never overwritten: to reassess the same export with different visualization settings, use another `--output` directory, as above. Older exports without a run ID or source hashes must be regenerated through Stage 2. The separate reference-directory argument is no longer needed. `--device` and `--output` can override defaults. Anomalib 2.7.0 and timm are included in `requirements.txt`; OpenCV headless supplies `cv2` for both stages.
 
-The configured `STAGE3_OUTPUT_DIR` defaults to `stage3Heatmaps/`. Each invocation creates a timestamped directory:
+The configured `STAGE3_OUTPUT_DIR` defaults to `stage3Heatmaps/`. Each invocation uses the exact Stage 2 run ID:
 
 ```text
 stage3Heatmaps/
@@ -120,17 +122,17 @@ Each building is cropped and assessed separately in memory. Raw anomaly maps are
 
 All displayed buildings share one scale, derived from the 30th and 98th percentiles of the covered scene pixels. Values at or below the lower limit are transparent; higher values progress through yellow, orange, and red with opacity rising to 80%. A flat scene uses a conservative 0-to-at-least-1 fallback to avoid exaggerating tiny numerical differences. This is scene-relative contrast, not calibrated damage severity, and default colors are not directly comparable across scenes.
 
-The image includes a legend with the actual thresholds and a dark-backed `B<id> | Anomaly: <raw score>` label for each assessed building. Labels are placed near their building with leader lines, kept within image bounds, and positioned to reduce collisions. In very crowded scenes some overlap may remain. The label is the model's building-level score; the heatmap shows local map values, so they need not have the same numerical maximum. Annotations intentionally occupy some background pixels.
+The image includes the run ID and a dark-backed `B<id> | Anomaly: <raw score>` label for each assessed building. Labels are placed near their building with leader lines, kept within image bounds, and positioned to reduce collisions. In very crowded scenes some overlap may remain. The label is the model's building-level score; the heatmap shows local map values, so they need not have the same numerical maximum. Annotations intentionally occupy some background pixels.
 
 For consistent cross-scene displays, explicitly choose the same range for each run:
 
 ```powershell
-python -m pipeline.stage3 --display-range 0.15 0.65 --show-context
+python -m pipeline.stage3 --display-range 0.15 0.65 --show-context --output stage3Heatmaps/fixedScale
 ```
 
 These example limits are visualization settings, not validated intact/damaged thresholds. Choose production thresholds using known-intact and known-damaged examples. Low anomaly must not be interpreted as proof that a building is intact.
 
-`anomalies.json` records per-building scores, bounds, raw-map paths, display mask type, and success/failure status. It also records the full-scene image path, overlap rule, selected range, scale mode, opacity settings, legend position, and label positions. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report and annotated scene without loading AnomalyDINO.
+`anomalies.json` records the shared run ID, matching boxed-image paths, source SHA-256 hashes, and a snapshot of each building's original `bbox_xyxy` and `rotated_corners`, alongside scores, integer crop bounds, raw-map paths, display mask type, and success/failure status. Stage 3 verifies the exact source-file bytes against Stage 2 hashes before loading the model, so replacing imagery under the same filename stops assessment instead of silently mixing runs. It also records the full-scene image path, overlap rule, selected range, scale mode, opacity settings and label positions. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report and annotated scene without loading AnomalyDINO.
 
 
 A report has status `completed`, `partial`, `failed`, or `empty`, with success/failure counts. Generated outputs are ignored by Git. Old run directories are retained, and the exact new report path is printed and returned by Stage 3.

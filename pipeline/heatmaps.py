@@ -33,7 +33,7 @@ def project_anomaly(scene_map, coverage, anomaly_map, bounds, corners=None):
     return mask_type
 
 
-def render_heatmap(image, scene_map, coverage, buildings, display_range=None):
+def render_heatmap(image, scene_map, coverage, buildings, display_range=None, *, run_id=None):
     values = scene_map[coverage]
     mode = "fixed" if display_range is not None else "scene_relative"
     if display_range is not None:
@@ -57,31 +57,14 @@ def render_heatmap(image, scene_map, coverage, buildings, display_range=None):
     overlay = Image.composite(heat, image, alpha)
     draw = ImageDraw.Draw(overlay)
     font = ImageFont.load_default(size=max(10, min(18, image.width // 65)))
-    title = "Scene-relative anomaly" if mode == "scene_relative" else "Anomaly display scale"
-    legend_lines = [title, f"Transparent <= {low:.3f}    Red >= {high:.3f}",
-                    "Not a damage probability"]
-    longest = max(legend_lines, key=lambda text: draw.textlength(text, font=font))
-    while draw.textlength(longest, font=font) + 16 > image.width and font.size > 6:
-        font = ImageFont.load_default(size=font.size - 1)
-    line_height = font.size + 5
-    legend_width = min(image.width, int(draw.textlength(longest, font=font)) + 16)
-    legend_height = min(image.height, line_height * 3 + 27)
-    positions = [(0, 0), (image.width - legend_width, 0),
-                 (0, image.height - legend_height),
-                 (image.width - legend_width, image.height - legend_height)]
-    lx, ly = min(positions, key=lambda pos: coverage[
-        pos[1]:pos[1] + legend_height, pos[0]:pos[0] + legend_width
-    ].sum())
-    legend = (lx, ly, lx + legend_width, ly + legend_height)
-    draw.rectangle(legend, fill="#171b24")
-    for index, text in enumerate(legend_lines):
-        draw.text((lx + 8, ly + 4 + index * line_height), text, fill="white", font=font)
-    bar_width = max(1, legend_width - 16)
-    bar = np.linspace(0, 255, bar_width, dtype=np.uint8)[None, :].repeat(9, axis=0)
-    overlay.paste(ImageOps.colorize(Image.fromarray(bar), black="#ffe34d",
-                                   mid="#ff8c1a", white="#ef2020"),
-                  (lx + 8, ly + legend_height - 14))
-    occupied = [legend]
+    occupied = []
+    if run_id is not None:
+        text = f"Run: {run_id}"
+        run_font = ImageFont.load_default(size=10)
+        bounds = (0, 0, min(image.width, int(draw.textlength(text, font=run_font)) + 8), 17)
+        draw.rectangle(bounds, fill="#171b24")
+        draw.text((4, 2), text, fill="white", font=run_font)
+        occupied.append(bounds)
     placements = []
     for building in buildings:
         if building["status"] != "completed":
@@ -114,5 +97,5 @@ def render_heatmap(image, scene_map, coverage, buildings, display_range=None):
     return overlay, {
         "mode": mode, "range": [low, high], "percentiles": [30, 98] if mode == "scene_relative" else None,
         "max_opacity": 0.8, "opacity_gamma": 1.4, "palette": "yellow-orange-red",
-        "legend_bbox_xyxy": list(legend), "labels": placements,
+        "labels": placements,
     }
