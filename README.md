@@ -1,6 +1,6 @@
 # Satellite Damage Assessment Pipeline
 
-The current script implements CLIP scene validation followed by before-image OWLv2 building detection, box merging, padding, and OpenCV roof orientation estimation. Matching polygons are projected onto the after image. Stage 3 scores each after-building crop against its matching before crop with AnomalyDINO and saves per-building heatmaps.
+The current script implements CLIP scene validation followed by before-image OWLv2 building detection, box merging, padding, and OpenCV roof orientation estimation. Matching polygons are projected onto the after image. Stage 3 scores each after-building crop against its matching before crop with AnomalyDINO and projects their heatmaps onto the full after scene.
 
 See [designReport.md](designReport.md) for the current architecture and proposed production deployment.
 
@@ -89,7 +89,7 @@ Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 
 Outputs are ignored by Git and recreated by the pipeline. Repeated runs overwrite these paths. A failed or rejected run may leave older outputs present, so check the terminal verdict before using an existing JSON file.
 
-## Stage 3: paired building heatmaps
+## Stage 3: paired building assessment and scene heatmap
 
 After Stage 2 successfully writes its JSON, the entry script passes that exact output path to Stage 3. Stage 1 rejection or Stage 2 failure stops the chain. Stage 3 loads both original images and crops matching rectangles using the rounded, clipped `bbox_xyxy` coordinates. It retains Stage 2's padding and does not use the annotated images or apply rotated masking.
 
@@ -109,13 +109,11 @@ The configured `STAGE3_OUTPUT_DIR` defaults to `stage3Heatmaps/`. Each invocatio
 stage3Heatmaps/
     pair3_<timestamp>/
         anomalies.json
-        building_0_before.png
-        building_0_after.png
-        building_0_heatmap.png
+        after3_heatmap.png
         building_0_anomaly.npy
 ```
 
-Every successfully assessed building gets these four artifacts. The heatmap overlays the after crop at its original crop size, using one fixed 0?1 display scale across buildings. The `.npy` file preserves raw values. `anomalies.json` records IDs, source paths, crop bounds, anomaly scores, artifact paths, and per-building status. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report without loading AnomalyDINO.
+Each building is still cropped and assessed separately in memory. Its anomaly map is resized to the crop dimensions and placed at the original crop coordinates on the full after scene. Overlaps use the maximum anomaly value and are blended only once. Pixels outside successfully assessed crop rectangles remain unchanged; the rectangles include Stage 2's padding. One `after<PAIR_ID>_heatmap.png` is saved for the entire scene, using a fixed 0?1 display scale. Individual crop PNGs are no longer saved. Per-building `.npy` files preserve raw maps. `anomalies.json` records IDs, source paths, crop bounds, anomaly scores, raw-map paths, and per-building status. The report also links the full-scene heatmap and records the overlap rule. Crop or assessment errors are recorded while remaining buildings continue. Missing source images, mismatched dimensions/IDs, model initialization failures, out-of-memory errors, and output-write failures stop execution. Zero detections produce an empty report without loading AnomalyDINO.
 
 A report has status `completed`, `partial`, `failed`, or `empty`, with success/failure counts. Generated outputs are ignored by Git. Old run directories are retained, and the exact new report path is printed and returned by Stage 3.
 

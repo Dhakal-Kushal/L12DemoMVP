@@ -85,6 +85,8 @@ def run_stage3_anomalydino(boxes_path, output_dir, device):
     run_dir = output_dir / f"pair{pair_id}_{datetime.now():%Y%m%d_%H%M%S_%f}"
     run_dir.mkdir()
     results = []
+    scene_map = np.zeros((after_img.height, after_img.width), dtype=np.float32)
+    coverage = np.zeros(scene_map.shape, dtype=bool)
     with torch.inference_mode():
         for box in boxes:
             box_id = box["box_id"]
@@ -117,30 +119,32 @@ def run_stage3_anomalydino(boxes_path, output_dir, device):
                 print(f"Box {box_id}: failed assessment: {error}")
                 continue
 
-            before_name = f"building_{box_id}_before.png"
-            crop_name = f"building_{box_id}_after.png"
             map_name = f"building_{box_id}_anomaly.npy"
-            overlay_name = f"building_{box_id}_heatmap.png"
-            before_crop.save(run_dir / before_name)
-            crop.save(run_dir / crop_name)
             np.save(run_dir / map_name, anomaly_map)
-            # Apply a shared display scale while preserving the original float map.
-            scaled = np.clip(anomaly_map / OVERLAY_MAX, 0, 1)
-            heat = Image.fromarray((scaled * 255).astype(np.uint8))
-            heat = ImageOps.colorize(heat, black="#111126", white="#fff12c", mid="#d04518")
-            overlay = Image.blend(crop, heat.resize(crop.size, Image.Resampling.BILINEAR), 0.45)
-            overlay.save(run_dir / overlay_name)
+            projected = np.asarray(Image.fromarray(anomaly_map.astype(np.float32)).resize(
+                crop.size, Image.Resampling.BILINEAR
+            ))
+            xmin, ymin, xmax, ymax = crop_box
+            region = scene_map[ymin:ymax, xmin:xmax]
+            np.maximum(region, projected, out=region)
+            coverage[ymin:ymax, xmin:xmax] = True
             results.append({
                 "box_id": box_id,
                 "status": "completed",
                 "crop_bbox_xyxy": crop_box,
-                "before_crop": before_name,
-                "after_crop": crop_name,
                 "anomaly_score": score,
                 "anomaly_map": map_name,
-                "anomaly_overlay": overlay_name,
             })
             print(f"Box {box_id}: raw anomaly score {score:.5f}")
+
+    scaled = np.clip(scene_map / OVERLAY_MAX, 0, 1)
+    heat = Image.fromarray((scaled * 255).astype(np.uint8))
+    heat = ImageOps.colorize(heat, black="#111126", white="#fff12c", mid="#d04518")
+    blended = Image.blend(after_img, heat, 0.45)
+    mask = Image.fromarray(coverage.astype(np.uint8) * 255)
+    overlay = Image.composite(blended, after_img, mask)
+    overlay_name = f"after{pair_id}_heatmap.png"
+    overlay.save(run_dir / overlay_name)
 
     report_path = run_dir / "anomalies.json"
     succeeded = sum(box["status"] == "completed" for box in results)
@@ -158,6 +162,8 @@ def run_stage3_anomalydino(boxes_path, output_dir, device):
             "encoder": ENCODER,
             "reference_mode": "matching_before_crop",
             "overlay_display_range": [0, OVERLAY_MAX],
+            "scene_heatmap": overlay_name,
+            "overlap_rule": "maximum",
             "boxes": results,
         }, handle, indent=2, allow_nan=False)
         handle.write("\n")
