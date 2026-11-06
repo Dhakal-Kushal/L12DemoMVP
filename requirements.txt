@@ -3,3 +3,4 @@ transformers==5.21.0
 Pillow==12.2.0
 opencv-python==5.0.0.93
 numpy==2.4.4
+anomalib==2.7.0

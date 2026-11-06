@@ -43,7 +43,7 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip check
 ```
 
-The requirements pin the five direct dependencies to versions observed in the current development environment. They are not a complete lock of transitive dependencies, and a fresh installation on every platform has not been validated. Record and review dependency changes together when Stage 3 introduces additional packages; avoid replacing this list with a freeze of an unrelated global environment.
+The requirements pin the six direct dependencies, including `anomalib` for Stage 3, to versions observed in the current development environment. They are not a complete lock of transitive dependencies, and a fresh installation on every platform has not been validated. Record and review dependency changes together when Stage 3 introduces additional packages; avoid replacing this list with a freeze of an unrelated global environment.
 
 For how pip installs requirements files, see the [pip user guide](https://pip.pypa.io/en/stable/user_guide/#requirements-files).
 
