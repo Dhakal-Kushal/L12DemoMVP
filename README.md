@@ -94,6 +94,10 @@ Commit source code, `requirements.txt`, this README, `.gitignore`, and the desig
 
 Stage 3 should read `stage2json/boxes.json` and the **original** before/after images. Match entries by pair and `box_id`; use `bbox_xyxy` for rectangular crops and `rotated_corners` for masks or alignment. Both sections contain identical before-derived geometry. Detection confidence is not damage confidence.
 
+## LLaVA chat context
+
+After Stage 3, `python -m pipeline.llava_context` writes the image and prompt LLaVA would receive for each chat question to `llavaContext/pair<N>/`. Pass `-q "question"` repeatedly to simulate a multi-turn chat. General questions use the after image with buildings outlined and labeled by ID; a question naming a building, such as "building 9", uses that building's before/after crops side by side. Anomaly scores go in the prompt text rather than the image. LLaVA itself is not called yet.
+
 For a tracked integration fixture, place a small image pair and its example JSON under `examples/`, with source paths adjusted to that fixture. There is no blanket ignore rule for image or JSON extensions, so those examples can be committed. Do not use the ignored runtime output folders for fixtures you intend to share.
 
 Virtual environments, private imagery, generated results, cached models, credentials, and editor preferences stay local. `.env.example` files can be committed with placeholder values. Docker containers and the React/backend stack described in the design report are future work and are not required to run this script.
