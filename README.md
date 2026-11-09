@@ -96,7 +96,19 @@ Stage 3 should read `stage2json/boxes.json` and the **original** before/after im
 
 ## LLaVA chat context
 
-After Stage 3, `python -m pipeline.llava_context` writes the image and prompt LLaVA would receive for each chat question to `llavaContext/pair<N>/`. Pass `-q "question"` repeatedly to simulate a multi-turn chat. General questions use the after image with buildings outlined and labeled by ID; a question naming a building, such as "building 9", uses that building's before/after crops side by side. Anomaly scores go in the prompt text rather than the image. LLaVA itself is not called yet.
+LLaVA runs in [Ollama](https://ollama.com/download), not in the Python environment. Install Ollama, then download the model once (about 4.7 GB; Ollama uses an NVIDIA GPU automatically when one is available):
+
+```powershell
+ollama pull llava
+```
+
+After Stage 3, with Ollama running, start a chat from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.llava_context
+```
+
+Type questions at the `You:` prompt and press Enter on an empty line to quit. Pass `-q "question"` one or more times to ask a fixed list instead. General questions use the after image with buildings outlined and labeled by ID; a question naming a building, such as "building 9", uses that building's before/after crops side by side. Anomaly scores go in the prompt text rather than the image. Each turn's image, prompt, and answer are written to `llavaContext/pair<N>/`. Add `--dry-run` to write the images and prompts without calling the model. The model name and Ollama address are set in `pipeline/config.py`.
 
 For a tracked integration fixture, place a small image pair and its example JSON under `examples/`, with source paths adjusted to that fixture. There is no blanket ignore rule for image or JSON extensions, so those examples can be committed. Do not use the ignored runtime output folders for fixtures you intend to share.
 

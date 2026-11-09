@@ -1,20 +1,27 @@
-"""Build the image and prompt LLaVA would receive for each chat question.
+"""Chat with LLaVA (served by Ollama) about the Stage 3 results.
 
-Run from the repo root after Stages 2 and 3:
+Run from the repo root after Stages 2 and 3, with Ollama running and the
+model pulled (ollama pull llava):
     python -m pipeline.llava_context
     python -m pipeline.llava_context -q "Which building looks most damaged?" -q "What changed at building 9?"
+    python -m pipeline.llava_context --dry-run
+
+Without -q, questions are read interactively until an empty line. With
+--dry-run, the images and prompts are written without calling the model.
 
 A general question gets the after image with every building outlined and
 labeled by ID. A question naming one building ("building 9") gets that
 building's before and after crops side by side. Scores stay in the prompt
-text: LLaVA 1.5 shrinks images to 336 px, where small drawn decimals are
-unreadable. Its processor also center-crops to a square, so images are
-padded to a square first.
+text because LLaVA downscales images until small drawn decimals are
+unreadable. Images are padded to a square so a center crop loses nothing.
 """
 
 import argparse
+import base64
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -152,13 +159,77 @@ def closeup_context(building, buildings, width, height):
     ])
 
 
-def llava_prompt(context, question, history=()):
-    parts = [f"USER: <image>\n{context}"]
-    if history:
-        parts.append("\nEarlier in this chat:")
-        parts += [f"User: {asked}\nAssistant: {answered}" for asked, answered in history]
-    parts.append(f"\nQuestion: {question} ASSISTANT:")
-    return "\n".join(parts)
+def chat_messages(context, question, image_path, history=()):
+    # Earlier turns stay text-only; only the current question carries an image.
+    messages = [{"role": "system", "content": context}]
+    for asked, answered in history:
+        messages += [{"role": "user", "content": asked}, {"role": "assistant", "content": answered}]
+    messages.append({"role": "user", "content": question, "images": [image_path]})
+    return messages
+
+
+def render_messages(messages):
+    blocks = []
+    for message in messages:
+        header = f"[{message['role']}]"
+        if "images" in message:
+            header += f" (image: {', '.join(Path(path).name for path in message['images'])})"
+        blocks.append(f"{header}\n{message['content']}")
+    return "\n\n".join(blocks)
+
+
+def ask_ollama(messages, model, url):
+    payload = [
+        {**message, "images": [base64.b64encode(Path(path).read_bytes()).decode("ascii") for path in message["images"]]}
+        if "images" in message else message
+        for message in messages
+    ]
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}/api/chat",
+        data=json.dumps({
+            "model": model, "messages": payload, "stream": True, "options": {"temperature": 0},
+        }).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        # The first request also loads the model, which can take a while.
+        response = urllib.request.urlopen(request, timeout=600)
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(body)["error"]
+        except (ValueError, KeyError):
+            detail = body or error.reason
+        hint = f" Run: ollama pull {model}" if error.code == 404 else ""
+        raise RuntimeError(f"Ollama error: {detail}.{hint}") from None
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {url} ({error.reason}). Start the Ollama app or run: ollama serve"
+        ) from None
+    chunks = []
+    with response:
+        for line in response:
+            part = json.loads(line)
+            if "error" in part:
+                raise RuntimeError(f"Ollama error: {part['error']}")
+            text = part.get("message", {}).get("content", "")
+            print(text, end="", flush=True)
+            chunks.append(text)
+    print()
+    return "".join(chunks).strip()
+
+
+def read_questions():
+    print("Ask about the buildings, e.g. 'Which building looks most damaged?' or "
+          "'What changed at building 9?'. Press Enter on an empty line to quit.")
+    while True:
+        try:
+            question = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not question:
+            return
+        yield question
 
 
 def focus_building(question, buildings):
@@ -179,8 +250,12 @@ def main():
     parser.add_argument("--anomalies", type=Path, default=None,
                         help="Stage 3 anomalies.json; defaults to the newest run in stage3outputs.")
     parser.add_argument("-q", "--question", action="append",
-                        help="Chat question; repeat to simulate a multi-turn chat.")
+                        help="Chat question; repeat for a multi-turn chat. Omit to chat interactively.")
     parser.add_argument("--output", type=Path, default=ROOT / "llavaContext")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Write the images and prompts without calling the model.")
+    parser.add_argument("--model", default=config.LLAVA_MODEL)
+    parser.add_argument("--ollama-url", default=config.OLLAMA_URL)
     args = parser.parse_args()
 
     anomalies_path = args.anomalies or latest_anomalies(ROOT / "stage3outputs")
@@ -192,19 +267,34 @@ def main():
     with Image.open(ROOT / after["source_image"]) as image:
         after_img = image.convert("RGB")
 
-    questions = args.question or [
-        "Which building looks most damaged?",
-        f"What changed at building {buildings[0]['box_id']}?",
-    ]
+    interactive = not args.question and not args.dry_run
+    if args.question:
+        questions = args.question
+    elif args.dry_run:
+        questions = [
+            "Which building looks most damaged?",
+            f"What changed at building {buildings[0]['box_id']}?",
+        ]
+    else:
+        questions = read_questions()
     output_dir = args.output / f"pair{stage2['pair_id']}"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Using {args.boxes} and {anomalies_path}")
+    if not args.dry_run:
+        print(f"Model: {args.model} via Ollama at {args.ollama_url}")
 
     history = []
     overview_path = output_dir / "overview.png"
     build_overview(after_img, buildings).save(overview_path)
-    for turn, question in enumerate(questions, 1):
-        building = focus_building(question, buildings)
+    for question in questions:
+        turn = len(history) + 1
+        try:
+            building = focus_building(question, buildings)
+        except ValueError as error:
+            if not interactive:
+                raise
+            print(error)
+            continue
         if building is None:
             image_path = overview_path
             context = overview_context(buildings, width, height)
@@ -212,11 +302,24 @@ def main():
             image_path = output_dir / f"building_{building['box_id']}.png"
             build_closeup(before_img, after_img, building).save(image_path)
             context = closeup_context(building, buildings, width, height)
-        prompt = llava_prompt(context, question, history)
+        messages = chat_messages(context, question, image_path, history)
         prompt_path = output_dir / f"turn_{turn}_prompt.txt"
-        prompt_path.write_text(prompt + "\n", encoding="utf-8")
-        print(f"\n=== Turn {turn}: image {image_path.name}, prompt {prompt_path.name} ===\n{prompt}")
-        history.append((question, f"<LLaVA's answer to turn {turn}>"))
+        prompt_path.write_text(render_messages(messages) + "\n", encoding="utf-8")
+        if args.dry_run:
+            print(f"\n=== Turn {turn}: prompt {prompt_path.name} ===\n{render_messages(messages)}")
+            history.append((question, f"<LLaVA's answer to turn {turn}>"))
+            continue
+        if not interactive:
+            print(f"\nYou: {question}")
+        print(f"[Turn {turn}: image {image_path.name}, prompt {prompt_path.name}]")
+        print("LLaVA: ", end="", flush=True)
+        try:
+            answer = ask_ollama(messages, args.model, args.ollama_url)
+        except RuntimeError as error:
+            print()
+            raise SystemExit(error) from None
+        (output_dir / f"turn_{turn}_answer.txt").write_text(answer + "\n", encoding="utf-8")
+        history.append((question, answer))
 
 
 if __name__ == "__main__":

@@ -15,3 +15,7 @@ NEGATIVE_QUERIES = [
 
 STAGE2_BOX_THRESHOLD = 0.15
 DEVICE = "cpu"
+
+# LLaVA chat, served by a local Ollama install (ollama pull llava)
+OLLAMA_URL = "http://localhost:11434"
+LLAVA_MODEL = "llava"
