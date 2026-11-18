@@ -54,3 +54,6 @@ Desktop.ini
 *.tmp
 *.swp
 *.swo
+
+
+/llavaContext/
