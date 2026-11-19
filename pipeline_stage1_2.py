@@ -5,10 +5,26 @@ import torch
 from PIL import Image
 
 from pipeline import config
-from pipeline.images import find_image
+from pipeline.images import available_pair_ids, find_image
 from pipeline.stage1 import run_stage1_clip
-from pipeline.stage2 import run_stage2_owlv2
+from pipeline.stage2 import run_stage2
 from pipeline.stage3 import run_stage3_anomalydino
+
+
+def select_pair(image_dir, preferred):
+    pairs = available_pair_ids(image_dir)
+    if not pairs:
+        sys.exit(f"No complete image pairs in {image_dir}. Add matching files such as before1.png and after1.png.")
+    default = preferred if preferred in pairs else pairs[0]
+    choices = {str(pair): pair for pair in pairs}
+    print("Available image pairs:", ", ".join(choices))
+    while True:
+        choice = input(f"Select pair ID [{default}]: ").strip()
+        if not choice:
+            return default
+        if choice in choices:
+            return choices[choice]
+        print("Enter one of the listed pair IDs.")
 
 
 def main():
@@ -23,6 +39,7 @@ def main():
         if device.index is not None and device.index >= torch.cuda.device_count():
             raise ValueError(f"CUDA device index is unavailable: {config.DEVICE}")
 
+    config.PAIR_ID = select_pair(config.IMAGE_DIR, config.PAIR_ID)
     before_path = find_image(config.IMAGE_DIR, "before", config.PAIR_ID)
     after_path = find_image(config.IMAGE_DIR, "after", config.PAIR_ID)
     with Image.open(before_path) as image:
@@ -37,9 +54,8 @@ def main():
         print("Stage 1 Verdict: NOT USABLE. Stopping pipeline.")
         sys.exit(0)
     print("Stage 1 Verdict: USABLE. Proceeding to Stage 2.")
-    boxes_path = run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
+    boxes_path = run_stage2(before_img, after_img, before_path, after_path, user_query)
     run_stage3_anomalydino(boxes_path, config.STAGE3_OUTPUT_DIR, config.DEVICE)
-
 
 if __name__ == "__main__":
     main()

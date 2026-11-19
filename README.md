@@ -1,6 +1,6 @@
 # Satellite Damage Assessment Pipeline
 
-The current script implements CLIP scene validation followed by before-image OWLv2 building detection, box merging, padding, and OpenCV roof orientation estimation. Matching polygons are projected onto the after image. Stage 3 scores each after-building crop against its matching before crop with AnomalyDINO and projects their heatmaps onto the full after scene.
+The current script implements CLIP scene validation followed by before-image OWLv2 building detection, score-ranked non-maximum suppression (NMS), padding, and SAM 2 roof segmentation with an OpenCV rectangle fitted to each mask. Stage 2 filters boxes by size, keeps detections in descending confidence order, and suppresses a candidate if its IoU with any retained box exceeds `STAGE2_NMS_IOU_THRESHOLD` (default 0.50). It compares unpadded boxes, then pads each retained box by 10% per side. Matching polygons are projected onto the after image. Stage 3 scores each after-building crop against its matching before crop with AnomalyDINO and projects their heatmaps onto the full after scene.
 
 See [designReport.md](designReport.md) for the current architecture and proposed production deployment.
 
@@ -20,7 +20,7 @@ pipeline/
     stage3.py
 ```
 
-`pipeline_stage1_2.py` coordinates the stages and remains the command-line entry point. Edit shared settings in `pipeline/config.py`. Image lookup lives in `images.py`, box merging and roof orientation in `geometry.py`, CLIP validation in `stage1.py`, OWLv2 detection and export in `stage2.py`, and paired anomaly assessment in `stage3.py`.
+`pipeline_stage1_2.py` coordinates the stages and remains the command-line entry point. Edit shared settings in `pipeline/config.py`. Image lookup lives in `images.py`, NMS and roof orientation in `geometry.py`, CLIP validation in `stage1.py`, OWLv2 detection and export in `stage2.py`, and paired anomaly assessment in `stage3.py`.
 
 Stages 1, 2, and 3 run in sequence from `main`. A future Stage 4 can be added as `pipeline/stage4.py` and called after Stage 3 returns its report path.
 
@@ -73,7 +73,7 @@ The second line should print `True` for CUDA operation. Merely changing `DEVICE`
 
 The sample images in `inputImages/` are tracked by Git and included when cloning the repository. Add additional shareable image pairs to this folder as needed; keep private imagery outside the repository.
 
-Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. In `pipeline/config.py`, set `PAIR_ID` to match the pair you supplied. Before/after images must have identical dimensions and represent spatially aligned tiles.
+Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. At startup, select a complete pair by its numeric ID. Press Enter to use the displayed default, which is the configured `PAIR_ID` when available or the lowest available ID otherwise. Before/after images must have identical dimensions and represent spatially aligned tiles.
 
 Run from the repository root:
 
@@ -81,7 +81,23 @@ Run from the repository root:
 .\.venv\Scripts\python.exe pipeline_stage1_2.py
 ```
 
-Enter a target query at the prompt, or press Enter for the default building query. On the first run, Hugging Face downloads the CLIP, OWLv2, and DINOv2 checkpoint files as their stages are reached, requiring internet access and local storage. Package installation does not download these weights. Later runs normally reuse the local Hugging Face cache. Weights are not committed to Git.
+Enter a target query at the prompt, or press Enter for the default building query. On the first run, Hugging Face downloads the the selected Stage 1, detector, segmenter, and Stage 3 checkpoint files as their stages are reached, requiring internet access and local storage. Package installation does not download these weights. Later runs normally reuse the local Hugging Face cache. Weights are not committed to Git.
+
+### Stage 1 scene screening
+
+Stage 1 checks target relevance on the before image and ground visibility on both images. A clear after image can pass even when the building has become rubble. The gate rejects when a competing irrelevant scene beats the requested target on the before image, or when the cloud prompt beats the strongest visible-ground prompt on either image, by at least `STAGE1_REJECT_MARGIN` raw logits. The starting margin of 2.0 is provisional and model dependent. A smaller adverse lead passes with an uncertainty message. The console records the model, each image's verdict and reason. Scene scores do not measure cloud area.
+
+Stage 1 defaults to RemoteCLIP ViT-B/32 with pinned weights and OpenCLIP preprocessing. Run `python -m pipeline.evaluate_stage1` to screen the three example pairs with the configured model. Add `--compare-models` to evaluate both RemoteCLIP and standard CLIP. To select standard CLIP for the pipeline, set `STAGE1_MODEL = "openai/clip-vit-base-patch32"` in `pipeline/config.py`.
+
+For accuracy evaluation, supply `--manifest labels.csv --split development`. The CSV columns are `before,after,query,split,usable,damaged`. Image paths are relative to the CSV; labels use 0 or 1. Use distinct scene pairs in the development and heldout splits. Include damaged but visible buildings, intact buildings, white roofs, partial clouds, severe obstruction, and irrelevant scenes. Tune `--margin` on development pairs, then evaluate the chosen setting with `--split heldout`. The evaluator reports rejected usable pairs (including the damaged subset), admitted unusable pairs, and inference time excluding model loading. Optional `before_cloud_fraction` and `after_cloud_fraction` columns accept independently measured fractions in [0, 1]; coverage of 20% or more gives an evaluation warning only.
+
+### Stage 2 detector and roof outlines
+
+In `pipeline/config.py`, the default detector is `STAGE2_DETECTOR = "owlv2"` with `STAGE2_OUTLINE_METHOD = "sam2"`. Set the outline method to `"otsu"` for the original grayscale baseline. Set the detector to `"grounding_dino"` to try Grounding DINO Tiny with the same tiled detection pipeline. Its box and text cutoffs are configured separately as `STAGE2_DINO_BOX_THRESHOLD` and `STAGE2_DINO_TEXT_THRESHOLD` (initial values 0.25).
+
+SAM 2.1 Hiera Tiny encodes the full before image once and takes unpadded detector boxes as prompts. Stage 2 fits a rectangle to the largest exterior mask contour in source coordinates. Empty, degenerate, out-of-bounds and poorly aligned fits fall back to the detector rectangle; the exported box includes an `outline_fallback` reason. The before and after exports share the same final geometry. Stage 3 scores the padded rectangular crop and uses the outline for heatmap display.
+
+Stage 2 detects on the full before image and on overlapping tiles (default 512 pixels with at least 25% overlap). It skips tile proposals touching an internal crop edge, translates the remaining boxes into scene coordinates, and runs box NMS across all views. After fitting the rotated roof outlines, a second NMS pass drops lower-confidence outlines whose polygon IoU with a retained outline exceeds `STAGE2_OUTLINE_IOU_THRESHOLD` (default 0.70). The detector confidence cutoff defaults to 0.22. A final containment check flags outlines when at least 95% of the smaller outline lies inside the larger one (`STAGE2_CONTAINMENT_THRESHOLD`). It drops a surrounding box if it encloses two candidates sharing at most 10% of the smaller candidate's area. For other nested pairs it keeps the higher-scoring outline. Building IDs are assigned after filtering. To compare with a full-image pass, set `STAGE2_TILE_SIZE = 0` in `pipeline/config.py`.
 
 Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 

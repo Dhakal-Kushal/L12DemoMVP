@@ -23,6 +23,10 @@ dist/
 /stage2json/
 /stage3outputs/
 /stage3Heatmaps/
+/llavaContext/
+
+# Local worktree used to review the main branch
+/.report-main/
 
 # Downloaded models and local caches
 /models/
