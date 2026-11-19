@@ -1,6 +1,6 @@
 # Satellite Damage Assessment Pipeline
 
-The current script implements CLIP scene validation followed by before-image OWLv2 building detection, box merging, padding, and OpenCV roof orientation estimation. Matching polygons are projected onto the after image. Stage 3 scores each after-building crop against its matching before crop with AnomalyDINO and projects their heatmaps onto the full after scene.
+The pipeline validates an aligned image pair with CLIP and uses OWLv2 to detect buildings in the before image. It projects building geometry onto the after image, generates an AnomalyDINO heatmap, and assigns provisional 0–3 damage grades using a supervised DINOv2 classifier.
 
 See [designReport.md](designReport.md) for the current architecture and proposed production deployment.
 
@@ -17,12 +17,15 @@ pipeline/
     heatmaps.py
     stage1.py
     stage2.py
+    stage2_inputs.py
     stage3.py
+    stage4.py
+    weights/xbd_dinov2_after_only.json
 ```
 
 `pipeline_stage1_2.py` coordinates the stages and remains the command-line entry point. Edit shared settings in `pipeline/config.py`. Image lookup lives in `images.py`, box merging and roof orientation in `geometry.py`, CLIP validation in `stage1.py`, OWLv2 detection and export in `stage2.py`, and paired anomaly assessment in `stage3.py`.
 
-Stages 1, 2, and 3 run in sequence from `main`. A future Stage 4 can be added as `pipeline/stage4.py` and called after Stage 3 returns its report path.
+Stages 1 through 4 run in sequence from `main`. Stage 3 and Stage 4 use the same Stage 2 export. Use `--skip-anomaly` to run grading without the heatmap.
 
 ## Setup after cloning
 
@@ -73,7 +76,7 @@ The second line should print `True` for CUDA operation. Merely changing `DEVICE`
 
 The sample images in `inputImages/` are tracked by Git and included when cloning the repository. Add additional shareable image pairs to this folder as needed; keep private imagery outside the repository.
 
-Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. In `pipeline/config.py`, set `PAIR_ID` to match the pair you supplied. Before/after images must have identical dimensions and represent spatially aligned tiles.
+Name files `before<N>` and `after<N>` with a supported extension: `.png`, `.jpg`, `.jpeg`, `.tif`, or `.tiff`. Pass `--pair N` or set `PAIR_ID` in `pipeline/config.py`. Before/after images must have identical dimensions and represent spatially aligned tiles.
 
 Run from the repository root:
 
@@ -81,7 +84,13 @@ Run from the repository root:
 .\.venv\Scripts\python.exe pipeline_stage1_2.py
 ```
 
-Enter a target query at the prompt, or press Enter for the default building query. On the first run, Hugging Face downloads the CLIP, OWLv2, and DINOv2 checkpoint files as their stages are reached, requiring internet access and local storage. Package installation does not download these weights. Later runs normally reuse the local Hugging Face cache. Weights are not committed to Git.
+To try damage grading on the included Pair 3 without generating the heatmap:
+
+```powershell
+.\.venv\Scripts\python.exe pipeline_stage1_2.py --pair 3 --skip-anomaly
+```
+
+Enter a target query at the prompt, or press Enter for the default building query. On a fresh machine, Hugging Face downloads the CLIP, OWLv2, and DINOv2 encoder weights as the pipeline reaches each model. Later runs reuse the local cache. The small trained severity classifier ships with the pipeline source.
 
 Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 
@@ -90,7 +99,21 @@ Stage 2 runs only if both images pass Stage 1. A successful Stage 2 writes:
 - `stage2json/<run_id>/boxes.json`
 - `stage2json/latest.json` pointing to the latest successful Stage 2 export
 
-Outputs are ignored by Git. Stage 2 generates one shared run ID (`pair<N>_<date>_<time>_<microseconds>`) used by both stages. Repeated pipeline runs preserve earlier results. The latest pointer updates atomically only after Stage 2 writes all its outputs; rejected or failed runs leave it pointing to the previous successful Stage 2 run. This pointer does not indicate Stage 3 success. Both boxed scenes and the heatmap display the run ID and matching `B<id>` building labels. Compare outputs with the same run ID.
+Outputs are ignored by Git. Stage 2 generates a shared run ID (`pair<N>_<date>_<time>_<microseconds>`) for downstream outputs. The latest pointer tracks the most recent successful Stage 2 export. Use the run ID and `box_id` to join boxed scenes, anomaly results, and damage grades.
+
+## Stage 4 damage grading
+
+The grader uses DINOv2 Small image features from the after image, pooled over each Stage 2 footprint. It applies a four-class linear classifier trained on 1,259 labeled buildings from the local [xBD dataset](https://arxiv.org/abs/1911.09296). Damage grading uses the existing Python dependencies and can run on CPU. The DINOv2 weights are checked against the encoder fingerprint stored with the bundled classifier.
+
+The run writes `stage4grades/<run_id>/damage_grades.json`. Each building has a `box_id`, its original geometry, and a grade of **0 No visible damage**, **1 Minor damage**, **2 Major damage**, or **3 Destroyed**. Unusable crops receive `null` and a reason. All predictions are provisional and marked for review. The class scores are uncalibrated. The initial after-only model scored 0.367 macro-F1 on 407 xBD buildings from three held-out events with annotated footprints. OWLv2 detections have yet to be evaluated against labeled grade data.
+
+To rerun grading on the latest successful Stage 2 export:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.stage4 --output stage4grades/review
+```
+
+Use `--boxes` to select a specific Stage 2 `boxes.json` and `--device` to override the configured device. Use a new `--output` directory when regrading an existing run. Stage 4 checks the source image hashes and dimensions before scoring.
 
 ## Stage 3: paired building assessment and scene heatmap
 

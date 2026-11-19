@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 
@@ -9,9 +10,17 @@ from pipeline.images import find_image
 from pipeline.stage1 import run_stage1_clip
 from pipeline.stage2 import run_stage2_owlv2
 from pipeline.stage3 import run_stage3_anomalydino
+from pipeline.stage4 import run_damage_grading
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Detect buildings and grade visible damage in an aligned image pair.")
+    parser.add_argument("--pair", type=int, default=config.PAIR_ID, help="Image pair number (default: %(default)s)")
+    parser.add_argument("--skip-anomaly", action="store_true", help="Skip the Stage 3 heatmap and run damage grading")
+    args = parser.parse_args()
+    if args.pair < 0:
+        parser.error("--pair must be nonnegative")
+    config.PAIR_ID = args.pair
     for directory in (config.IMAGE_DIR, config.OUTPUT_DIR, config.STAGE2_OUTPUT_DIR):
         os.makedirs(directory, exist_ok=True)
     if not 0.0 <= config.STAGE2_BOX_THRESHOLD <= 1.0:
@@ -38,7 +47,9 @@ def main():
         sys.exit(0)
     print("Stage 1 Verdict: USABLE. Proceeding to Stage 2.")
     boxes_path = run_stage2_owlv2(before_img, after_img, before_path, after_path, user_query)
-    run_stage3_anomalydino(boxes_path, config.STAGE3_OUTPUT_DIR, config.DEVICE)
+    if not args.skip_anomaly:
+        run_stage3_anomalydino(boxes_path, config.STAGE3_OUTPUT_DIR, config.DEVICE)
+    run_damage_grading(boxes_path, config.STAGE4_OUTPUT_DIR, config.DEVICE)
 
 
 if __name__ == "__main__":

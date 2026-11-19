@@ -4,19 +4,15 @@ import argparse
 import json
 import math
 from pathlib import Path
-import hashlib
-from io import BytesIO
 
 import numpy as np
 import torch
-from PIL import Image
 
-from .runs import validate_run_id
 from . import config
 from .heatmaps import project_anomaly, render_heatmap
+from .stage2_inputs import ROOT, latest_stage2_export, load_source_images, read_stage2_export
 
 
-ROOT = Path(__file__).resolve().parents[1]
 ENCODER = "vit_small_patch14_dinov2"
 IMAGE_SIZE = (252, 252)
 
@@ -40,41 +36,14 @@ def run_stage3_anomalydino(boxes_path, output_dir, device, *, display_range=None
         low, high = map(float, display_range)
         if not np.isfinite([low, high]).all() or not 0 <= low < high:
             raise ValueError("Display range must contain finite values with 0 <= low < high.")
-    with open(boxes_path, encoding="utf-8") as handle:
-        metadata = json.load(handle)
-    run_id = validate_run_id(metadata.get("run_id"))
-    pair_id = metadata["pair_id"]
-    if type(pair_id) is not int or pair_id < 0:
-        raise ValueError("Stage 2 pair_id must be a nonnegative integer.")
-    if not run_id.startswith(f"pair{pair_id}_"):
-        raise ValueError("Run ID does not match pair_id.")
+    metadata = read_stage2_export(boxes_path)
+    run_id, pair_id = metadata["run_id"], metadata["pair_id"]
     run_dir = Path(output_dir) / run_id
     if run_dir.exists():
         raise FileExistsError(f"Run already exists: {run_dir}. Use --output with a different directory to rerun Stage 3.")
     before, after = metadata["before"], metadata["after"]
     boxes = after["boxes"]
-    if before["boxes"] != boxes or any(
-        section["num_detections"] != len(boxes) for section in (before, after)
-    ):
-        raise ValueError("Expected matching before/after boxes in the Stage 2 export.")
-    box_ids = [box["box_id"] for box in boxes]
-    if any(type(box_id) is not int or box_id < 0 for box_id in box_ids) or len(set(box_ids)) != len(box_ids):
-        raise ValueError("Stage 2 box IDs must be unique nonnegative integers.")
-
-    before_path = (ROOT / before["source_image"]).resolve()
-    after_path = (ROOT / after["source_image"]).resolve()
-    loaded = []
-    for section, path in ((before, before_path), (after, after_path)):
-        data = path.read_bytes()
-        if hashlib.sha256(data).hexdigest() != section.get("source_sha256"):
-            raise ValueError(f"Source image hash mismatch: {path}. Regenerate Stage 2 for the current imagery.")
-        with Image.open(BytesIO(data)) as image:
-            loaded.append(image.convert("RGB"))
-    before_img, after_img = loaded
-    expected_size = (after["width"], after["height"])
-    if (after_img.size != expected_size or before_img.size != expected_size
-            or (before["width"], before["height"]) != expected_size):
-        raise ValueError("Stage 2 dimensions do not match the source imagery.")
+    (before_path, before_img), (after_path, after_img) = load_source_images(metadata)
 
     print(f"Run: {run_id}")
     print(f"\n--- STAGE 3: ANOMALYDINO (Pair {pair_id}) ---")
@@ -198,12 +167,10 @@ def main():
     parser.add_argument("--show-context", action="store_true")
     args = parser.parse_args()
     if args.boxes is None:
-        pointer = ROOT / config.STAGE2_OUTPUT_DIR / "latest.json"
-        if not pointer.exists():
-            parser.error("No latest Stage 2 export. Run the pipeline first or provide --boxes.")
-        latest = json.loads(pointer.read_text(encoding="utf-8"))
-        run_id = validate_run_id(latest.get("run_id"))
-        args.boxes = pointer.parent / run_id / "boxes.json"
+        try:
+            args.boxes = latest_stage2_export(config.STAGE2_OUTPUT_DIR)
+        except FileNotFoundError as error:
+            parser.error(str(error))
     run_stage3_anomalydino(args.boxes, args.output, args.device,
                          display_range=args.display_range, mask_roofs=not args.show_context)
 

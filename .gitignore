@@ -23,6 +23,7 @@ dist/
 /stage2json/
 /stage3outputs/
 /stage3Heatmaps/
+/stage4grades/
 
 # Downloaded models and local caches
 /models/

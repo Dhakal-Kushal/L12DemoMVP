@@ -4,6 +4,7 @@ IMAGE_DIR = "inputImages"
 OUTPUT_DIR = "boxedOutput"
 STAGE2_OUTPUT_DIR = "stage2json"
 STAGE3_OUTPUT_DIR = "stage3Heatmaps"
+STAGE4_OUTPUT_DIR = "stage4grades"
 
 
 NEGATIVE_QUERIES = [
